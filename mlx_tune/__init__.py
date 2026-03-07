@@ -13,7 +13,7 @@ Supported Training Methods:
 - VLM (Vision Language Model) fine-tuning
 """
 
-__version__ = "0.4.0"  # Renamed to mlx-tune (formerly unsloth-mlx)
+__version__ = "0.4.1"  # Full VLM fine-tuning support
 
 from mlx_tune.model import FastLanguageModel
 from mlx_tune.trainer import (
@@ -58,6 +58,9 @@ from mlx_tune.losses import (
 from mlx_tune.vlm import (
     FastVisionModel,
     VLMSFTTrainer,
+    VLMSFTConfig,
+    VLMModelWrapper,
+    UnslothVisionDataCollator,
     load_vlm_dataset,
 )
 
@@ -113,6 +116,9 @@ __all__ = [
     # Vision Models
     "FastVisionModel",
     "VLMSFTTrainer",
+    "VLMSFTConfig",
+    "VLMModelWrapper",
+    "UnslothVisionDataCollator",
     # Loss Functions
     "compute_log_probs",
     "compute_log_probs_with_lengths",

@@ -76,7 +76,7 @@ Local Mac (MLX-Tune)       →     Cloud GPU (Unsloth)
 
 ## Project Status
 
-> 🚀 **v0.4.0** - Renamed to MLX-Tune + all previous features!
+> 🚀 **v0.4.1** - Full Vision Model fine-tuning support!
 
 | Feature | Status | Notes |
 |---------|--------|-------|
@@ -89,10 +89,10 @@ Local Mac (MLX-Tune)       →     Cloud GPU (Unsloth)
 | KTO/SimPO | ✅ Stable | Proper loss implementations |
 | Chat Templates | ✅ Stable | 15 models (llama, gemma, qwen, phi, mistral) |
 | Response-Only Training | ✅ Stable | `train_on_responses_only()` |
-| **Multi-turn Merging** | ✅ **NEW** | `to_sharegpt()` + `conversation_extension` |
-| **Column Mapping** | ✅ **NEW** | `apply_column_mapping()` auto-rename |
-| **Dataset Config** | ✅ **NEW** | `HFDatasetConfig` structured loading |
-| Vision Models | ⚠️ Beta | Via mlx-vlm |
+| Multi-turn Merging | ✅ Stable | `to_sharegpt()` + `conversation_extension` |
+| Column Mapping | ✅ Stable | `apply_column_mapping()` auto-rename |
+| Dataset Config | ✅ Stable | `HFDatasetConfig` structured loading |
+| **Vision Models** | ✅ **NEW** | **Full VLM fine-tuning** via mlx-vlm |
 | PyPI Package | ✅ Available | `uv pip install mlx-tune` |
 
 ## Installation
@@ -177,6 +177,43 @@ trainer = train_on_responses_only(
 )
 ```
 
+### Vision Model Fine-Tuning (NEW!)
+
+Fine-tune vision-language models like Qwen3.5 on image+text tasks:
+
+```python
+from mlx_tune import FastVisionModel, UnslothVisionDataCollator, VLMSFTTrainer
+from mlx_tune.vlm import VLMSFTConfig
+
+# Load a vision model
+model, processor = FastVisionModel.from_pretrained(
+    "mlx-community/Qwen3.5-0.8B-bf16",
+)
+
+# Add LoRA (same params as Unsloth!)
+model = FastVisionModel.get_peft_model(
+    model,
+    finetune_vision_layers=True,
+    finetune_language_layers=True,
+    r=16, lora_alpha=16,
+)
+
+# Train on image-text data
+FastVisionModel.for_training(model)
+trainer = VLMSFTTrainer(
+    model=model,
+    tokenizer=processor,
+    data_collator=UnslothVisionDataCollator(model, processor),
+    train_dataset=dataset,
+    args=VLMSFTConfig(max_steps=30, learning_rate=2e-4),
+)
+trainer.train()
+```
+
+Requires `mlx-vlm`: `uv pip install mlx-tune[vlm]`
+
+See [`examples/10_qwen35_vision_finetuning.py`](examples/10_qwen35_vision_finetuning.py) for the full workflow.
+
 ## Supported Training Methods
 
 | Method | Trainer | Implementation | Use Case |
@@ -187,7 +224,7 @@ trainer = train_on_responses_only(
 | **GRPO** | `GRPOTrainer` | ✅ Native MLX | Reasoning with multi-generation (DeepSeek R1 style) |
 | **KTO** | `KTOTrainer` | ✅ Native MLX | Kahneman-Tversky optimization |
 | **SimPO** | `SimPOTrainer` | ✅ Native MLX | Simple preference optimization |
-| **VLM** | `VLMSFTTrainer` | ⚠️ Beta | Vision-Language models |
+| **VLM SFT** | `VLMSFTTrainer` | ✅ Native MLX | Vision-Language model fine-tuning |
 
 ## Examples
 
