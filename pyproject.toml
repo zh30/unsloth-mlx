@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mlx-tune"
-version = "0.4.2"
+version = "0.4.3"
 description = "MLX-powered LLM fine-tuning for Apple Silicon - Unsloth-compatible API for Mac"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -29,7 +29,7 @@ classifiers = [
 dependencies = [
     "mlx>=0.31.0",
     "mlx-lm>=0.31.0",
-    "mlx-vlm>=0.3.0",
+    "mlx-vlm>=0.3.12",
     "transformers>=4.36.0",
     "tokenizers>=0.15.0",
     "datasets>=2.14.0",

@@ -31,6 +31,8 @@ import json
 
 
 # Check for mlx-vlm availability
+# Supports both mlx-vlm >=0.4.0 (new API) and 0.3.x (legacy API)
+_MLX_VLM_LEGACY = False  # True if using 0.3.x API
 try:
     from mlx_vlm import load as vlm_load
     from mlx_vlm import generate as vlm_generate
@@ -42,11 +44,22 @@ try:
         apply_lora_layers,
         freeze_model,
     )
-    from mlx_vlm.trainer.trainer import (
-        Trainer as VLMTrainerInternal,
-        Dataset as VLMDataset,
-        save_adapter,
-    )
+
+    # mlx-vlm >=0.4.0: trainer.trainer removed, split into sft_trainer + datasets
+    try:
+        from mlx_vlm.trainer.sft_trainer import save_adapter
+        from mlx_vlm.trainer.datasets import VisionDataset as VLMDataset
+        # Trainer class replaced by train() function — we handle this in VLMSFTTrainer
+        VLMTrainerInternal = None
+    except ImportError:
+        # mlx-vlm <0.4.0: legacy imports
+        from mlx_vlm.trainer.trainer import (
+            Trainer as VLMTrainerInternal,
+            Dataset as VLMDataset,
+            save_adapter,
+        )
+        _MLX_VLM_LEGACY = True
+
     HAS_MLX_VLM = True
 except ImportError:
     HAS_MLX_VLM = False
@@ -676,6 +689,89 @@ class UnslothVisionDataCollator:
             )
 
 
+class _VLMTrainerShim:
+    """
+    Compatibility shim for mlx-vlm >=0.4.0 where the Trainer class was removed.
+
+    Replicates the subset of the old Trainer API that VLMSFTTrainer relies on:
+    model, optimizer, loss_fn(), train_step().
+    """
+
+    def __init__(self, model, optimizer, train_on_completions=False, assistant_id=None):
+        self.model = model
+        self.optimizer = optimizer
+        self.train_on_completions = train_on_completions
+        self.assistant_id = assistant_id
+
+    def loss_fn(self, model, batch):
+        """Compute cross-entropy loss, optionally masking prompt tokens."""
+        import mlx.core as mx
+        import mlx.nn as nn
+
+        input_ids = batch["input_ids"]
+        pixel_values = batch.get("pixel_values")
+        mask = batch.get("attention_mask")
+
+        # Forward pass — build kwargs for model
+        fwd_kwargs = {"input_ids": input_ids}
+        if pixel_values is not None:
+            fwd_kwargs["pixel_values"] = pixel_values
+        if mask is not None:
+            fwd_kwargs["attention_mask"] = mask
+        # Pass through any extra model-specific keys (e.g. image_grid_thw)
+        for k, v in batch.items():
+            if k not in ("input_ids", "pixel_values", "attention_mask"):
+                fwd_kwargs[k] = v
+
+        logits = model(**fwd_kwargs)
+        if isinstance(logits, tuple):
+            logits = logits[0]
+
+        # Shift for next-token prediction
+        shift_logits = logits[:, :-1, :]
+        shift_labels = input_ids[:, 1:]
+
+        # Cross-entropy loss
+        loss = nn.losses.cross_entropy(
+            shift_logits, shift_labels, reduction="none"
+        )
+
+        # Mask padding tokens
+        if mask is not None:
+            loss_mask = mask[:, 1:].astype(loss.dtype)
+        else:
+            loss_mask = mx.ones_like(loss)
+
+        # Mask prompt tokens (train on completions only)
+        if self.train_on_completions and self.assistant_id is not None:
+            completion_mask = mx.zeros_like(shift_labels, dtype=loss.dtype)
+            for i in range(shift_labels.shape[0]):
+                labels_list = shift_labels[i].tolist()
+                in_completion = False
+                mask_row = [0.0] * len(labels_list)
+                for j, tok in enumerate(labels_list):
+                    if tok == self.assistant_id:
+                        in_completion = True
+                    if in_completion:
+                        mask_row[j] = 1.0
+                completion_mask = completion_mask.at[i].put(mx.array(mask_row))
+            loss_mask = loss_mask * completion_mask
+
+        loss = (loss * loss_mask).sum() / mx.maximum(loss_mask.sum(), 1)
+        return loss
+
+    def train_step(self, batch):
+        """Single training step: forward + backward + update."""
+        import mlx.core as mx
+        import mlx.nn as nn
+
+        loss_and_grad_fn = nn.value_and_grad(self.model, self.loss_fn)
+        loss, grads = loss_and_grad_fn(self.model, batch)
+        self.optimizer.update(self.model, grads)
+        mx.eval(self.model, self.optimizer.state)
+        return loss
+
+
 class VLMSFTTrainer:
     """
     Supervised Fine-Tuning Trainer for Vision Language Models.
@@ -790,15 +886,25 @@ class VLMSFTTrainer:
                 if ids:
                     assistant_id = ids[0]
 
-        # Set up the mlx-vlm Trainer
+        # Set up training internals
         # train_on_completions=True trains only on assistant response tokens
         # (matches Unsloth/TRL SFTTrainer behavior)
-        trainer = VLMTrainerInternal(
-            self.actual_model,
-            optimizer,
-            train_on_completions=True,
-            assistant_id=assistant_id,
-        )
+        if _MLX_VLM_LEGACY and VLMTrainerInternal is not None:
+            # mlx-vlm <0.4.0: use Trainer class
+            trainer = VLMTrainerInternal(
+                self.actual_model,
+                optimizer,
+                train_on_completions=True,
+                assistant_id=assistant_id,
+            )
+        else:
+            # mlx-vlm >=0.4.0: Trainer class removed, use _VLMTrainerShim
+            trainer = _VLMTrainerShim(
+                self.actual_model,
+                optimizer,
+                train_on_completions=True,
+                assistant_id=assistant_id,
+            )
 
         # Determine total steps
         dataset_len = len(self.train_dataset) if hasattr(self.train_dataset, "__len__") else 0
@@ -916,12 +1022,21 @@ class VLMSFTTrainer:
         config = self.actual_model.config.__dict__ if hasattr(self.actual_model.config, "__dict__") else self.actual_model.config
 
         # Wrap dataset
-        vlm_dataset = VLMDataset(
-            self.train_dataset,
-            config,
-            self.processor,
-            image_processor=self.wrapper.image_processor if self.wrapper else None,
-        )
+        if _MLX_VLM_LEGACY:
+            # mlx-vlm <0.4.0: Dataset accepts image_processor kwarg
+            vlm_dataset = VLMDataset(
+                self.train_dataset,
+                config,
+                self.processor,
+                image_processor=self.wrapper.image_processor if self.wrapper else None,
+            )
+        else:
+            # mlx-vlm >=0.4.0: VisionDataset has simplified constructor
+            vlm_dataset = VLMDataset(
+                self.train_dataset,
+                config,
+                self.processor,
+            )
 
         progress = tqdm(range(total_steps), desc="Training")
         total_loss = 0.0
